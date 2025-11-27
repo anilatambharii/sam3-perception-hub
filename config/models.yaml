@@ -1,0 +1,13 @@
+# Model configuration
+sam3:
+  checkpoint: "sam3_hiera_large.pt"
+  device: "cuda:0"
+  dtype: "bfloat16"
+  
+sam3d_objects:
+  checkpoint: "sam3d_objects_v1.pt"
+  texture_resolution: 1024
+  
+sam3d_body:
+  checkpoint: "sam3d_body_v1.pt"
+  pose_model: "smplx"

@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'perception-api'
+    static_configs:
+      - targets: ['perception-api:8080']
+    metrics_path: /metrics
+
+  - job_name: 'reconstruction-api'
+    static_configs:
+      - targets: ['reconstruction-api:8081']
+    metrics_path: /metrics
+
+  - job_name: 'agent-bridge'
+    static_configs:
+      - targets: ['agent-bridge:8082']
+    metrics_path: /metrics

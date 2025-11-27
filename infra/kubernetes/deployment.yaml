@@ -1,0 +1,394 @@
+# =============================================================================
+# SAM3 Perception Hub - Kubernetes Deployment
+# =============================================================================
+# Deploy with: kubectl apply -f kubernetes/
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sam3-hub
+
+---
+# ConfigMap for shared configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sam3-config
+  namespace: sam3-hub
+data:
+  LOG_LEVEL: "INFO"
+  ENABLE_FACE_BLUR: "true"
+  CACHE_EMBEDDINGS: "true"
+  MAX_BATCH_SIZE: "8"
+
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sam3-secrets
+  namespace: sam3-hub
+type: Opaque
+stringData:
+  REDIS_URL: "redis://redis:6379"
+  # Add your API keys here
+  # FAL_API_KEY: ""
+
+---
+# Perception API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perception-api
+  namespace: sam3-hub
+  labels:
+    app: perception-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: perception-api
+  template:
+    metadata:
+      labels:
+        app: perception-api
+    spec:
+      containers:
+      - name: perception-api
+        image: sam3-perception-api:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 50051
+          name: grpc
+        envFrom:
+        - configMapRef:
+            name: sam3-config
+        - secretRef:
+            name: sam3-secrets
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "16Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: perception-api
+  namespace: sam3-hub
+spec:
+  selector:
+    app: perception-api
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: grpc
+    port: 50051
+    targetPort: 50051
+
+---
+# Reconstruction API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reconstruction-api
+  namespace: sam3-hub
+  labels:
+    app: reconstruction-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reconstruction-api
+  template:
+    metadata:
+      labels:
+        app: reconstruction-api
+    spec:
+      containers:
+      - name: reconstruction-api
+        image: sam3-reconstruction-api:latest
+        ports:
+        - containerPort: 8081
+        envFrom:
+        - configMapRef:
+            name: sam3-config
+        - secretRef:
+            name: sam3-secrets
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "2"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "24Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reconstruction-api
+  namespace: sam3-hub
+spec:
+  selector:
+    app: reconstruction-api
+  ports:
+  - port: 8081
+    targetPort: 8081
+
+---
+# Agent Bridge Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-bridge
+  namespace: sam3-hub
+  labels:
+    app: agent-bridge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-bridge
+  template:
+    metadata:
+      labels:
+        app: agent-bridge
+    spec:
+      containers:
+      - name: agent-bridge
+        image: sam3-agent-bridge:latest
+        ports:
+        - containerPort: 8082
+        env:
+        - name: PERCEPTION_API_URL
+          value: "http://perception-api:8080"
+        - name: RECONSTRUCTION_API_URL
+          value: "http://reconstruction-api:8081"
+        envFrom:
+        - configMapRef:
+            name: sam3-config
+        - secretRef:
+            name: sam3-secrets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-bridge
+  namespace: sam3-hub
+spec:
+  selector:
+    app: agent-bridge
+  ports:
+  - port: 8082
+    targetPort: 8082
+
+---
+# Playground Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playground
+  namespace: sam3-hub
+  labels:
+    app: playground
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: playground
+  template:
+    metadata:
+      labels:
+        app: playground
+    spec:
+      containers:
+      - name: playground
+        image: sam3-playground:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NEXT_PUBLIC_PERCEPTION_API_URL
+          value: "http://perception-api:8080"
+        - name: NEXT_PUBLIC_RECONSTRUCTION_API_URL
+          value: "http://reconstruction-api:8081"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playground
+  namespace: sam3-hub
+spec:
+  selector:
+    app: playground
+  ports:
+  - port: 3000
+    targetPort: 3000
+
+---
+# Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sam3-ingress
+  namespace: sam3-hub
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+spec:
+  rules:
+  - host: sam3.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: playground
+            port:
+              number: 3000
+      - path: /api/perception
+        pathType: Prefix
+        backend:
+          service:
+            name: perception-api
+            port:
+              number: 8080
+      - path: /api/reconstruction
+        pathType: Prefix
+        backend:
+          service:
+            name: reconstruction-api
+            port:
+              number: 8081
+
+---
+# PVC for model cache
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+  namespace: sam3-hub
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: sam3-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: sam3-hub
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+
+---
+# HorizontalPodAutoscaler for perception-api
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: perception-api-hpa
+  namespace: sam3-hub
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: perception-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

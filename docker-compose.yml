@@ -1,0 +1,237 @@
+version: "3.9"
+
+services:
+  # =============================================================================
+  # Core Services
+  # =============================================================================
+  
+  perception-api:
+    build:
+      context: ./services/perception-api
+      dockerfile: Dockerfile
+    container_name: sam3-perception-api
+    ports:
+      - "${PERCEPTION_API_PORT:-8080}:8080"
+      - "${PERCEPTION_GRPC_PORT:-50051}:50051"
+    environment:
+      - SAM3_MODEL_PATH=/models/sam3
+      - SAM3_DEVICE=${SAM3_DEVICE:-cuda:0}
+      - SAM3_INFERENCE_PROVIDER=${SAM3_INFERENCE_PROVIDER:-local}
+      - FAL_API_KEY=${FAL_API_KEY:-}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - OTEL_ENDPOINT=http://jaeger:4317
+      - ENABLE_FACE_BLUR=${ENABLE_FACE_BLUR:-true}
+      - CONCEPT_DENYLIST=${CONCEPT_DENYLIST:-}
+      - AUDIT_LOG_ENABLED=${AUDIT_LOG_ENABLED:-true}
+    volumes:
+      - ${MODEL_CACHE_DIR:-./models}:/models:ro
+      - perception-cache:/tmp/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  reconstruction-api:
+    build:
+      context: ./services/reconstruction-api
+      dockerfile: Dockerfile
+    container_name: sam3-reconstruction-api
+    ports:
+      - "${RECONSTRUCTION_API_PORT:-8081}:8081"
+      - "${RECONSTRUCTION_GRPC_PORT:-50052}:50052"
+    environment:
+      - SAM3D_MODEL_PATH=/models/sam3d
+      - SAM3D_DEVICE=${SAM3D_DEVICE:-cuda:0}
+      - SAM3_INFERENCE_PROVIDER=${SAM3_INFERENCE_PROVIDER:-local}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - OTEL_ENDPOINT=http://jaeger:4317
+    volumes:
+      - ${MODEL_CACHE_DIR:-./models}:/models:ro
+      - reconstruction-cache:/tmp/cache
+      - reconstruction-output:/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  agent-bridge:
+    build:
+      context: ./services/agent-bridge
+      dockerfile: Dockerfile
+    container_name: sam3-agent-bridge
+    ports:
+      - "${AGENT_BRIDGE_PORT:-8082}:8082"
+    environment:
+      - PERCEPTION_API_URL=http://perception-api:8080
+      - RECONSTRUCTION_API_URL=http://reconstruction-api:8081
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - OTEL_ENDPOINT=http://jaeger:4317
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      - perception-api
+      - reconstruction-api
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  playground:
+    build:
+      context: ./ui/playground
+      dockerfile: Dockerfile
+    container_name: sam3-playground
+    ports:
+      - "${PLAYGROUND_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_PERCEPTION_API_URL=http://localhost:${PERCEPTION_API_PORT:-8080}
+      - NEXT_PUBLIC_RECONSTRUCTION_API_URL=http://localhost:${RECONSTRUCTION_API_PORT:-8081}
+      - NEXT_PUBLIC_AGENT_BRIDGE_URL=http://localhost:${AGENT_BRIDGE_PORT:-8082}
+    depends_on:
+      - perception-api
+      - reconstruction-api
+    restart: unless-stopped
+
+  # =============================================================================
+  # Infrastructure
+  # =============================================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: sam3-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sam3-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-sam3}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-sam3password}
+      - POSTGRES_DB=${POSTGRES_DB:-sam3_hub}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sam3}"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: sam3-minio
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # =============================================================================
+  # Observability
+  # =============================================================================
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.53
+    container_name: sam3-jaeger
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: sam3-prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./infra/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: sam3-grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+  perception-cache:
+  reconstruction-cache:
+  reconstruction-output:
+
+networks:
+  default:
+    name: sam3-network
