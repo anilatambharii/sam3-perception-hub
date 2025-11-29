@@ -1,9 +1,3 @@
-<img src="https://r2cdn.perplexity.ai/pplx-full-logo-primary-dark%402x.png" style="height:64px;margin-right:32px"/>
-
-# ok I will skip the content demo. Anlayze the [https://github.com/anilatambharii/sam3-perception-hub/blob/main/README.md](https://github.com/anilatambharii/sam3-perception-hub/blob/main/README.md) and provide me with the revised readme.md file since i tried different steps to successfully run the demos
-
-Here's the revised README.md reflecting the actual Windows setup steps you went through:
-
 ```markdown
 # 🎯 SAM3 Perception Hub
 
